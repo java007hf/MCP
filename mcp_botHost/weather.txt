@@ -1,0 +1,106 @@
+Event: Flood Warning
+Area: Tompkins, NY
+Severity: Severe
+Description: ...Forecast flooding changed from Minor to Moderate severity for the
+following rivers in New York...
+
+Cayuga Lake At Ithaca affecting Tompkins County.
+
+* WHAT...Minor flooding is occurring and moderate flooding is
+forecast.
+
+* WHERE...Cayuga Lake at Ithaca.
+
+* WHEN...Until further notice.
+
+* IMPACTS...At 383.5 feet, The lake level is high enough to flood
+normally dry areas along the shoreline and may affect some paths,
+or roads nearest the shore.
+
+* ADDITIONAL DETAILS...
+- At 10:00 AM EDT Thursday the stage was 383.7 feet.
+- Forecast...The lake will slowly rise to near 384 feet on
+Saturday.
+- Flood stage is 383.5 feet.
+- https://www.weather.gov/safety/flood
+Instructions: Please report observed flooding to local emergency services or law
+enforcement and request they pass this information to the National
+Weather Service when you can do so safely.
+
+Additional information is available at www.weather.gov.
+
+The next statement will be issued this afternoon at 200 PM EDT.
+
+---
+
+Event: Flood Warning
+Area: Cortland, NY
+Severity: Severe
+Description: ...The Flood Warning continues for the following rivers in New
+York...
+
+Tioughnioga River At Cortland affecting Cortland County.
+
+* WHAT...Minor flooding is occurring and minor flooding is forecast.
+
+* WHERE...Tioughnioga River at Cortland.
+
+* WHEN...Until this evening.
+
+* IMPACTS...At 8.0 feet, Minor flood stage. Flooding leads to some
+closures along Kellogg Road to the south of Cortland.
+
+* ADDITIONAL DETAILS...
+- At 9:00 AM EDT Thursday the stage was 8.7 feet.
+- Forecast...The river will continue falling to below flood
+stage today. Additional rainfall tonight and Friday will
+cause the river to rise again to near flood stage on Saturday
+morning.
+- Flood stage is 8.0 feet.
+- https://www.weather.gov/safety/flood
+Instructions: Motorists should not attempt to drive around barricades or drive
+cars through flooded areas.
+
+Caution is urged when walking near riverbanks.
+
+Additional information is available at www.weather.gov.
+
+The next statement will be issued this afternoon at noon EDT.
+
+---
+
+Event: Flood Watch
+Area: Northern Litchfield; Southern Litchfield; Northern Berkshire; Southern Berkshire; Southern Fulton; Montgomery; Northern Saratoga; Schoharie; Western Schenectady; Eastern Schenectady; Southern Saratoga; Western Albany; Eastern Albany; Western Rensselaer; Eastern Rensselaer; Western Greene; Eastern Greene; Western Columbia; Eastern Columbia; Western Ulster; Eastern Ulster; Western Dutchess; Eastern Dutchess; Northern Fulton; Southeast Warren; Southern Washington; Bennington; Western Windham; Eastern Windham
+Severity: Severe
+Description: * WHAT...Flooding caused by excessive rainfall is possible.
+
+* WHERE...Portions of northwestern Connecticut, including the
+following areas, Litchfield County, western Massachusetts,
+including Berkshire County, in eastern New York, including the
+eastern Catskills, mid Hudson Valley, the Greater Capital Region,
+central and eastern Mohawk Valley, the Taconics, Schoharie Valley,
+Helderbergs and southern reaches of the Lake George and northern
+Saratoga Region, as well as southern Vermont including Bennington
+and Windham Counties.
+
+* WHEN...From late tonight through Saturday morning.
+
+* IMPACTS...Excessive runoff may result in flooding of rivers,
+creeks, streams, and other low-lying and flood-prone locations.
+Creeks and streams may rise out of their banks. Flooding may occur
+in poor drainage and urban areas.
+
+* ADDITIONAL DETAILS...
+- A low pressure system will bring 1.5 to 3 inches of rainfall
+to the region late tonight into Saturday morning. This
+rainfall will fall on already saturated soils from heavy
+rainfall from the past weekend into early this week.  Some
+isolated flash flooding can not be ruled out.  Minor flooding
+of main stem rivers, creeks and small streams may occur.
+Some rivers that could reach the minor flood stage include
+the Esopus, Schoharie, Hoosic, Walloomsac, Housatonic, and
+the Hudson River at Troy and Waterford.
+- http://www.weather.gov/safety/flood
+Instructions: You should monitor later forecasts and be alert for possible Flood
+Warnings. Those living in areas prone to flooding should be prepared
+to take action should flooding develop.
