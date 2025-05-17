@@ -2,6 +2,15 @@ import asyncio # 异步编程支持
 import os # 操作系统功能
 import json # 添加全局 json 模块导入
 import traceback # 添加 traceback 模块导入，用于打印详细的错误信息
+import argparse # 添加命令行参数解析
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+import uvicorn
+from typing import Optional, Protocol, Dict, Any
+from sse_starlette.sse import EventSourceResponse
+from abc import ABC, abstractmethod
 
 # agent: agent 是SDK的核心构建块，定义 agent 的行为、指令和可用工具
 # Model: 抽象基类，定义模型的接口
@@ -164,74 +173,147 @@ class MCPServerManager:
             raise RuntimeError("MCP 服务器未初始化")
         return cls._weather_server, cls._bot_server
 
-async def handle_tool_call(event_item) -> None:
-    """处理工具调用事件
+# 定义请求模型
+class QueryRequest(BaseModel):
+    query: str
+    streaming: Optional[bool] = True
+
+# 创建 FastAPI 应用
+app = FastAPI(title="MCP Agent API")
+
+# 配置 CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 允许所有来源，生产环境应该限制
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class OutputHandler(ABC):
+    """输出处理器基类"""
     
-    Args:
-        event_item: 工具调用事件项
-    """
-    if event_item.type == "tool_call_item":
-        print(f"当前被调用工具信息: {event_item}")
-        raw_item = getattr(event_item, "raw_item", None)
-        tool_name = ""
-        tool_args = {}
-        if raw_item:
-            tool_name = getattr(raw_item, "name", "未知工具")
-            tool_str = getattr(raw_item, "arguments", "{}")
-            if isinstance(tool_str, str):
-                try:
-                    tool_args = json.loads(tool_str)
-                except json.JSONDecodeError:
-                    tool_args = {"raw_arguments": tool_str}
-        print(f"\n工具名称: {tool_name}", flush=True)
-        print(f"\n工具参数: {tool_args}", flush=True)
-    elif event_item.type == "tool_call_output_item":
-        raw_item = getattr(event_item, "raw_item", None)
-        tool_id = "未知工具ID"
-        if isinstance(raw_item, dict) and "call_id" in raw_item:
-            tool_id = raw_item["call_id"]
-        output = getattr(event_item, "output", "未知输出")
-
-        output_text = ""
-        if isinstance(output, str) and (output.startswith("{") or output.startswith("[")):
-            output_data = json.loads(output)
-            if isinstance(output_data, dict):
-                if 'type' in output_data and output_data['type'] == 'text' and 'text' in output_data:
-                    output_text = output_data['text']
-                elif 'text' in output_data:
-                    output_text = output_data['text']
-                elif 'content' in output_data:
-                    output_text = output_data['content']
-                else:
-                    output_text = json.dumps(output_data, ensure_ascii=False, indent=2)
-        else:
-            output_text = str(output)
-
-        print(f"\n工具调用{tool_id} 返回结果: {output_text}", flush=True)
-
-async def handle_model_response(event) -> None:
-    """处理模型响应事件
+    @abstractmethod
+    async def handle_model_delta(self, delta: str) -> None:
+        """处理模型增量输出"""
+        pass
     
-    Args:
-        event: 模型响应事件
-    """
-    if event.type == "raw_response_event":
-        if isinstance(event.data, ResponseTextDeltaEvent):
-            print(event.data.delta, end="", flush=True)
-        elif isinstance(event.data, ResponseContentPartDoneEvent):
-            print(f"\n", end="", flush=True)
+    @abstractmethod
+    async def handle_model_done(self) -> None:
+        """处理模型输出完成"""
+        pass
+    
+    @abstractmethod
+    async def handle_tool_call(self, name: str, arguments: str) -> None:
+        """处理工具调用"""
+        pass
+    
+    @abstractmethod
+    async def handle_tool_output(self, tool_id: str, output: str) -> None:
+        """处理工具输出"""
+        pass
+    
+    @abstractmethod
+    async def handle_final_output(self, content: str) -> None:
+        """处理最终输出"""
+        pass
+    
+    @abstractmethod
+    async def handle_error(self, error: str) -> None:
+        """处理错误"""
+        pass
 
-async def run_agent(query: str, streaming: bool = True) -> None:
+class CLIOutputHandler(OutputHandler):
+    """命令行输出处理器"""
+    
+    async def handle_model_delta(self, delta: str) -> None:
+        print(delta, end="", flush=True)
+    
+    async def handle_model_done(self) -> None:
+        print("\n", end="", flush=True)
+    
+    async def handle_tool_call(self, name: str, arguments: str) -> None:
+        print(f"\n工具名称: {name}", flush=True)
+        print(f"工具参数: {arguments}", flush=True)
+    
+    async def handle_tool_output(self, tool_id: str, output: str) -> None:
+        print(f"\n工具调用{tool_id} 返回结果: {output}", flush=True)
+    
+    async def handle_final_output(self, content: str) -> None:
+        print("\n===== 完整agent信息 =====")
+        print(content)
+    
+    async def handle_error(self, error: str) -> None:
+        print(f"运行Agent时出错: {error}")
+        traceback.print_exc()
+
+class HTTPOutputHandler(OutputHandler):
+    """HTTP输出处理器"""
+    
+    async def handle_model_delta(self, delta: str) -> None:
+        yield {
+            "event": "model_response",
+            "data": json.dumps({
+                "type": "delta",
+                "content": delta
+            })
+        }
+    
+    async def handle_model_done(self) -> None:
+        yield {
+            "event": "model_response",
+            "data": json.dumps({
+                "type": "done"
+            })
+        }
+    
+    async def handle_tool_call(self, name: str, arguments: str) -> None:
+        yield {
+            "event": "tool_call",
+            "data": json.dumps({
+                "type": "call",
+                "name": name,
+                "arguments": arguments
+            })
+        }
+    
+    async def handle_tool_output(self, tool_id: str, output: str) -> None:
+        yield {
+            "event": "tool_call",
+            "data": json.dumps({
+                "type": "output",
+                "tool_id": tool_id,
+                "output": output
+            })
+        }
+    
+    async def handle_final_output(self, content: str) -> None:
+        yield {
+            "event": "model_response",
+            "data": json.dumps({
+                "type": "final",
+                "content": content
+            })
+        }
+    
+    async def handle_error(self, error: str) -> None:
+        yield {
+            "event": "error",
+            "data": json.dumps({
+                "error": error
+            })
+        }
+
+async def run_agent(query: str, output_handler: OutputHandler, streaming: bool = True) -> None:
     """
     启动并运行agent，支持流式输出
 
     Args:
         query (str): 用户的自然语言查询
+        output_handler (OutputHandler): 输出处理器
         streaming (bool): 是否流式输出
     """
     try:
-        print("正在初始化DeepSeek-MCP agent...")
-        
         # 获取已初始化的服务器实例
         weather_server, bot_server = MCPServerManager.get_servers()
 
@@ -254,8 +336,6 @@ async def run_agent(query: str, streaming: bool = True) -> None:
             )
         )
 
-        print(f"\n正在处理查询：{query}\n")
-
         # 使用流式输出模式
         if streaming:
             result = Runner.run_streamed(
@@ -269,23 +349,50 @@ async def run_agent(query: str, streaming: bool = True) -> None:
                 )
             )
 
-            print("回复:", end="", flush=True)
-            try:
-                async for event in result.stream_events():
-                    if event.type == "raw_response_event":
-                        await handle_model_response(event)
-                    elif event.type == "run_item_stream_event":
-                        await handle_tool_call(event.item)
-            except Exception as e:
-                print(f"处理流式响应事件时发生错误: {e}", flush=True)
-                
-            print("\n\n运行完成！")
+            async for event in result.stream_events():
+                if event.type == "raw_response_event":
+                    if isinstance(event.data, ResponseTextDeltaEvent):
+                        await output_handler.handle_model_delta(event.data.delta)
+                    elif isinstance(event.data, ResponseContentPartDoneEvent):
+                        await output_handler.handle_model_done()
+                elif event.type == "run_item_stream_event":
+                    if event.item.type == "tool_call_item":
+                        raw_item = getattr(event.item, "raw_item", None)
+                        if raw_item:
+                            await output_handler.handle_tool_call(
+                                getattr(raw_item, "name", "未知工具"),
+                                getattr(raw_item, "arguments", "{}")
+                            )
+                    elif event.item.type == "tool_call_output_item":
+                        raw_item = getattr(event.item, "raw_item", None)
+                        tool_id = "未知工具ID"
+                        if isinstance(raw_item, dict) and "call_id" in raw_item:
+                            tool_id = raw_item["call_id"]
+                        output = getattr(event.item, "output", "未知输出")
+                        
+                        output_text = ""
+                        if isinstance(output, str) and (output.startswith("{") or output.startswith("[")):
+                            try:
+                                output_data = json.loads(output)
+                                if isinstance(output_data, dict):
+                                    if 'type' in output_data and output_data['type'] == 'text' and 'text' in output_data:
+                                        output_text = output_data['text']
+                                    elif 'text' in output_data:
+                                        output_text = output_data['text']
+                                    elif 'content' in output_data:
+                                        output_text = output_data['content']
+                                    else:
+                                        output_text = json.dumps(output_data, ensure_ascii=False, indent=2)
+                            except json.JSONDecodeError:
+                                output_text = str(output)
+                        else:
+                            output_text = str(output)
+                            
+                        await output_handler.handle_tool_output(tool_id, output_text)
 
             if hasattr(result, "final_output"):
-                print("\n===== 完整agent信息 =====")
-                print(result.final_output)
+                await output_handler.handle_final_output(result.final_output)
         else:
-            print("使用非流式输出模式处理查询...")
             result = await Runner.run(
                 agent,
                 input=query,
@@ -298,55 +405,110 @@ async def run_agent(query: str, streaming: bool = True) -> None:
             )
 
             if hasattr(result, "final_output"):
-                print("\n===== 完整agent信息 =====")
-                print(result.final_output)
+                await output_handler.handle_final_output(result.final_output)
             else:
-                print("\n未获取到信息")
+                await output_handler.handle_final_output("未获取到信息")
             
             if hasattr(result, "new_items"):
-                print("\n===== 工具调用历史 =====")
                 for item in result.new_items:
-                    await handle_tool_call(item)
+                    if item.type == "tool_call_item":
+                        raw_item = getattr(item, "raw_item", None)
+                        if raw_item:
+                            await output_handler.handle_tool_call(
+                                getattr(raw_item, "name", "未知工具"),
+                                getattr(raw_item, "arguments", "{}")
+                            )
+                    elif item.type == "tool_call_output_item":
+                        raw_item = getattr(item, "raw_item", None)
+                        tool_id = "未知工具ID"
+                        if isinstance(raw_item, dict) and "call_id" in raw_item:
+                            tool_id = raw_item["call_id"]
+                        output = getattr(item, "output", "未知输出")
+                        
+                        output_text = ""
+                        if isinstance(output, str) and (output.startswith("{") or output.startswith("[")):
+                            try:
+                                output_data = json.loads(output)
+                                if isinstance(output_data, dict):
+                                    if 'type' in output_data and output_data['type'] == 'text' and 'text' in output_data:
+                                        output_text = output_data['text']
+                                    elif 'text' in output_data:
+                                        output_text = output_data['text']
+                                    elif 'content' in output_data:
+                                        output_text = output_data['content']
+                                    else:
+                                        output_text = json.dumps(output_data, ensure_ascii=False, indent=2)
+                            except json.JSONDecodeError:
+                                output_text = str(output)
+                        else:
+                            output_text = str(output)
+                            
+                        await output_handler.handle_tool_output(tool_id, output_text)
 
     except Exception as e:
-        print(f"运行Agent时出错: {e}")
-        traceback.print_exc()
+        await output_handler.handle_error(str(e))
+
+async def run_cli():
+    """命令行交互模式"""
+    print("===== DeepSeek MCP =====")
+    print("请输入自然语言查询")
+    print("输入'quit'或'退出'结束程序")
+    print("=======================\n")
+
+    while True:
+        # 获取用户输入
+        user_query = input("\n请输入您的命令(输入'quit'或'退出'结束程序): ").strip()
+
+        # 检查是否退出
+        if user_query.lower() in ["quit", "退出"]:
+            print("感谢使用DeepSeek MCP 再见！")
+            break
+        
+        # 如果查询为空，则提示用户输入
+        if not user_query:
+            print("查询内容不能为空，请重新输入。")
+            continue
+        
+        # 获取输出模型
+        streaming = input("是否启用流式输出? (y/n, 默认y): ").strip().lower() != "n"
+
+        # 运行agent
+        await run_agent(user_query, CLIOutputHandler(), streaming)
+
+async def run_http_server():
+    """HTTP 服务器模式"""
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+@app.post("/query")
+async def handle_query(request: QueryRequest):
+    """处理来自 app 的查询请求，返回 SSE 流"""
+    return EventSourceResponse(
+        run_agent(request.query, HTTPOutputHandler(), request.streaming),
+        media_type="text/event-stream"
+    )
 
 async def main():
     """
-    应用程序主函数 - 循环交互模式
-
-    这个函数实现了一个交互式循环，让用户输入自然语言控制机器人
+    应用程序主函数 - 根据命令行参数选择运行模式
     """
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='DeepSeek MCP 服务')
+    parser.add_argument('--mode', choices=['cli', 'http'], default='cli',
+                      help='运行模式: cli (命令行交互) 或 http (HTTP服务)')
+    args = parser.parse_args()
+
     try:
         # 初始化 MCP 服务器
         await MCPServerManager.initialize()
-
-        print("===== DeepSeek MCP =====")
-        print("请输入自然语言查询")
-        print("输入'quit'或'退出'结束程序")
-        print("=======================\n")
-
-        while True:
-            # 获取用户输入
-            user_query = input("\n请输入您的命令(输入'quit'或'退出'结束程序): ").strip()
-
-            # 检查是否退出
-            if user_query.lower() in ["quit", "退出"]:
-                print("感谢使用DeepSeek MCP 再见！")
-                break
+        
+        if args.mode == 'cli':
+            await run_cli()
+        else:
+            print("启动 HTTP 服务器模式...")
+            await run_http_server()
             
-            # 如果查询为空，则提示用户输入
-            if not user_query:
-                print("查询内容不能为空，请重新输入。")
-                continue
-            
-            # 获取输出模型
-            streaming = input("是否启用流式输出? (y/n, 默认y): ").strip().lower() != "n"
-
-            # 运行agent
-            await run_agent(user_query, streaming)
-
     except KeyboardInterrupt:
         print("\n程序被用户中断，正在退出...")
     except Exception as e:
