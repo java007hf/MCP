@@ -8,9 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import uvicorn
-from typing import Optional, Protocol, Dict, Any
+from typing import Optional, Protocol, Dict, Any, List
 from sse_starlette.sse import EventSourceResponse
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 # agent: agent 是SDK的核心构建块，定义 agent 的行为、指令和可用工具
 # Model: 抽象基类，定义模型的接口
@@ -173,10 +174,80 @@ class MCPServerManager:
             raise RuntimeError("MCP 服务器未初始化")
         return cls._weather_server, cls._bot_server
 
-# 定义请求模型
+class Conversation:
+    """对话历史管理类"""
+    
+    def __init__(self, max_history: int = 10):
+        """
+        初始化对话历史
+        
+        Args:
+            max_history (int): 最大历史记录数
+        """
+        self.history: List[Dict[str, Any]] = []
+        self.max_history = max_history
+    
+    def add_message(self, role: str, content: str) -> None:
+        """
+        添加消息到历史记录
+        
+        Args:
+            role (str): 消息角色（user/assistant）
+            content (str): 消息内容
+        """
+        self.history.append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # 如果超出最大历史记录数，删除最旧的消息
+        if len(self.history) > self.max_history:
+            self.history.pop(0)
+    
+    def get_history(self) -> List[Dict[str, Any]]:
+        """获取历史记录"""
+        return self.history
+    
+    def clear(self) -> None:
+        """清空历史记录"""
+        self.history.clear()
+
+class ConversationManager:
+    """对话管理器"""
+    
+    def __init__(self):
+        self.conversations: Dict[str, Conversation] = {}
+    
+    def get_conversation(self, session_id: str) -> Conversation:
+        """
+        获取或创建对话
+        
+        Args:
+            session_id (str): 会话ID
+        """
+        if session_id not in self.conversations:
+            self.conversations[session_id] = Conversation()
+        return self.conversations[session_id]
+    
+    def clear_conversation(self, session_id: str) -> None:
+        """
+        清空指定会话的历史记录
+        
+        Args:
+            session_id (str): 会话ID
+        """
+        if session_id in self.conversations:
+            self.conversations[session_id].clear()
+
+# 创建全局对话管理器实例
+conversation_manager = ConversationManager()
+
+# 修改请求模型
 class QueryRequest(BaseModel):
     query: str
     streaming: Optional[bool] = True
+    session_id: Optional[str] = "default"  # 添加会话ID字段
 
 # 创建 FastAPI 应用
 app = FastAPI(title="MCP Agent API")
@@ -304,27 +375,44 @@ class HTTPOutputHandler(OutputHandler):
             })
         }
 
-async def run_agent(query: str, output_handler: OutputHandler, streaming: bool = True) -> None:
+async def run_agent(query: str, output_handler: OutputHandler, streaming: bool = True, session_id: str = "default") -> None:
     """
-    启动并运行agent，支持流式输出
+    启动并运行agent，支持流式输出和上下文记忆
 
     Args:
         query (str): 用户的自然语言查询
         output_handler (OutputHandler): 输出处理器
         streaming (bool): 是否流式输出
+        session_id (str): 会话ID，用于维护对话上下文
     """
     try:
+        # 获取或创建对话
+        conversation = conversation_manager.get_conversation(session_id)
+        
+        # 添加用户消息到历史记录
+        conversation.add_message("user", query)
+        
         # 获取已初始化的服务器实例
         weather_server, bot_server = MCPServerManager.get_servers()
+
+        # 构建系统提示，包含历史记录
+        history_context = "\n".join([
+            f"{msg['role']}: {msg['content']}"
+            for msg in conversation.get_history()[:-1]  # 不包含当前消息
+        ])
+        
+        system_instructions = (
+            "你是一个平衡车机器人，可以帮助用户查询天气信息、根据用户的指令控制平衡车行走。"
+            "用户可能会询问天气状况、天气预报等信息，请根据用户的问题选择合适的工具进行查询。"
+            "用户可能会询问平衡车行走的指令，请根据用户的问题选择合适的工具进行控制。"
+            "\n\n以下是之前的对话历史，请参考上下文来理解用户的意图：\n"
+            f"{history_context}"
+        )
 
         # 创建agent实例
         agent = Agent(
             name="平衡车Agent",
-            instructions=(
-                "你是一个平衡车机器人，可以帮助用户查询天气信息、根据用户的指令控制平衡车行走。"
-                "用户可能会询问天气状况、天气预报等信息，请根据用户的问题选择合适的工具进行查询。"
-                "用户可能会询问平衡车行走的指令，请根据用户的问题选择合适的工具进行控制。"
-            ),
+            instructions=system_instructions,
             mcp_servers=[weather_server, bot_server],
             model_settings=ModelSettings(
                 temperature=0.6,
@@ -349,9 +437,11 @@ async def run_agent(query: str, output_handler: OutputHandler, streaming: bool =
                 )
             )
 
+            full_response = ""
             async for event in result.stream_events():
                 if event.type == "raw_response_event":
                     if isinstance(event.data, ResponseTextDeltaEvent):
+                        full_response += event.data.delta
                         await output_handler.handle_model_delta(event.data.delta)
                     elif isinstance(event.data, ResponseContentPartDoneEvent):
                         await output_handler.handle_model_done()
@@ -390,6 +480,9 @@ async def run_agent(query: str, output_handler: OutputHandler, streaming: bool =
                             
                         await output_handler.handle_tool_output(tool_id, output_text)
 
+            # 添加助手回复到历史记录
+            conversation.add_message("assistant", full_response)
+
             if hasattr(result, "final_output"):
                 await output_handler.handle_final_output(result.final_output)
         else:
@@ -405,6 +498,8 @@ async def run_agent(query: str, output_handler: OutputHandler, streaming: bool =
             )
 
             if hasattr(result, "final_output"):
+                # 添加助手回复到历史记录
+                conversation.add_message("assistant", result.final_output)
                 await output_handler.handle_final_output(result.final_output)
             else:
                 await output_handler.handle_final_output("未获取到信息")
@@ -453,8 +548,11 @@ async def run_cli():
     print("===== DeepSeek MCP =====")
     print("请输入自然语言查询")
     print("输入'quit'或'退出'结束程序")
-    print("=======================\n")
+    print("输入'clear'或'清除'清空对话历史")
+    print("=======================")
 
+    session_id = "cli_session"
+    
     while True:
         # 获取用户输入
         user_query = input("\n请输入您的命令(输入'quit'或'退出'结束程序): ").strip()
@@ -463,6 +561,12 @@ async def run_cli():
         if user_query.lower() in ["quit", "退出"]:
             print("感谢使用DeepSeek MCP 再见！")
             break
+        
+        # 检查是否清空历史
+        if user_query.lower() in ["clear", "清除"]:
+            conversation_manager.clear_conversation(session_id)
+            print("对话历史已清空")
+            continue
         
         # 如果查询为空，则提示用户输入
         if not user_query:
@@ -473,7 +577,7 @@ async def run_cli():
         streaming = input("是否启用流式输出? (y/n, 默认y): ").strip().lower() != "n"
 
         # 运行agent
-        await run_agent(user_query, CLIOutputHandler(), streaming)
+        await run_agent(user_query, CLIOutputHandler(), streaming, session_id)
 
 async def run_http_server():
     """HTTP 服务器模式"""
@@ -485,9 +589,16 @@ async def run_http_server():
 async def handle_query(request: QueryRequest):
     """处理来自 app 的查询请求，返回 SSE 流"""
     return EventSourceResponse(
-        run_agent(request.query, HTTPOutputHandler(), request.streaming),
+        run_agent(request.query, HTTPOutputHandler(), request.streaming, request.session_id),
         media_type="text/event-stream"
     )
+
+# 添加清空对话历史的接口
+@app.post("/clear_history")
+async def clear_history(session_id: str = "default"):
+    """清空指定会话的对话历史"""
+    conversation_manager.clear_conversation(session_id)
+    return {"status": "success", "message": "对话历史已清空"}
 
 async def main():
     """
