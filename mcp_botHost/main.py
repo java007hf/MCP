@@ -3,7 +3,7 @@ import os # 操作系统功能
 import json # 添加全局 json 模块导入
 import traceback # 添加 traceback 模块导入，用于打印详细的错误信息
 import argparse # 添加命令行参数解析
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -12,6 +12,7 @@ from typing import Optional, Protocol, Dict, Any, List
 from sse_starlette.sse import EventSourceResponse
 from abc import ABC, abstractmethod
 from datetime import datetime
+from collections import defaultdict
 
 # agent: agent 是SDK的核心构建块，定义 agent 的行为、指令和可用工具
 # Model: 抽象基类，定义模型的接口
@@ -319,61 +320,55 @@ class CLIOutputHandler(OutputHandler):
         traceback.print_exc()
 
 class HTTPOutputHandler(OutputHandler):
-    """HTTP输出处理器"""
+    """HTTP输出处理器（改为向SSE队列发布事件）"""
     
+    def __init__(self, session_id: str):
+        self.session_id = session_id  # 新增：绑定会话ID
+
     async def handle_model_delta(self, delta: str) -> None:
-        yield {
-            "event": "model_response",
-            "data": json.dumps({
-                "type": "delta",
-                "content": delta
-            })
-        }
+        print(delta, end="", flush=True)
+        await sse_registry.publish(
+            self.session_id,
+            {"event": "model_delta", "data": {"content": delta}}
+        )
     
     async def handle_model_done(self) -> None:
-        yield {
-            "event": "model_response",
-            "data": json.dumps({
-                "type": "done"
-            })
-        }
+        print("\n", end="", flush=True)
+        await sse_registry.publish(
+            self.session_id,
+            {"event": "model_done", "data": {}}
+        )
     
     async def handle_tool_call(self, name: str, arguments: str) -> None:
-        yield {
-            "event": "tool_call",
-            "data": json.dumps({
-                "type": "call",
-                "name": name,
-                "arguments": arguments
-            })
-        }
+        print(f"\n工具名称: {name}", flush=True)
+        print(f"工具参数: {arguments}", flush=True)
+        await sse_registry.publish(
+            self.session_id,
+            {"event": "tool_call", "data": {"name": name, "arguments": arguments}}
+        )
     
     async def handle_tool_output(self, tool_id: str, output: str) -> None:
-        yield {
-            "event": "tool_call",
-            "data": json.dumps({
-                "type": "output",
-                "tool_id": tool_id,
-                "output": output
-            })
-        }
+        print(f"\n工具调用{tool_id} 返回结果: {output}", flush=True)
+        await sse_registry.publish(
+            self.session_id,
+            {"event": "tool_output", "data": {"tool_id": tool_id, "output": output}}
+        )
     
     async def handle_final_output(self, content: str) -> None:
-        yield {
-            "event": "model_response",
-            "data": json.dumps({
-                "type": "final",
-                "content": content
-            })
-        }
+        print("\n===== 完整agent信息 =====")
+        print(content)
+        await sse_registry.publish(
+            self.session_id,
+            {"event": "final_output", "data": {"content": content}}
+        )
     
     async def handle_error(self, error: str) -> None:
-        yield {
-            "event": "error",
-            "data": json.dumps({
-                "error": error
-            })
-        }
+        print(f"运行Agent时出错: {error}")
+        traceback.print_exc()
+        await sse_registry.publish(
+            self.session_id,
+            {"event": "error", "data": {"error": error}}
+        )
 
 async def run_agent(query: str, output_handler: OutputHandler, streaming: bool = True, session_id: str = "default") -> None:
     """
@@ -585,13 +580,76 @@ async def run_http_server():
     server = uvicorn.Server(config)
     await server.serve()
 
+
+
+class SSERegistry:
+    """管理 SSE 会话的事件队列"""
+    def __init__(self):
+        self.queues = defaultdict(asyncio.Queue)  # session_id -> asyncio.Queue
+
+    async def publish(self, session_id: str, event: dict):
+        """向指定会话的队列发布事件"""
+        if session_id in self.queues:
+            await self.queues[session_id].put(event)
+
+    async def subscribe(self, session_id: str) -> asyncio.Queue:
+        """订阅指定会话的事件队列"""
+        queue = self.queues[session_id]
+        return queue
+
+    def unregister(self, session_id: str):
+        """移除会话的队列（可选，用于清理资源）"""
+        if session_id in self.queues:
+            del self.queues[session_id]
+
+# 创建全局 SSE 注册中心实例
+sse_registry = SSERegistry()
+
 @app.post("/query")
-async def handle_query(request: QueryRequest):
-    """处理来自 app 的查询请求，返回 SSE 流"""
-    return EventSourceResponse(
-        run_agent(request.query, HTTPOutputHandler(), request.streaming, request.session_id),
-        media_type="text/event-stream"
+async def query(request: QueryRequest):
+    """立即返回确认响应，并异步执行run_agent"""
+    # 启动异步任务执行run_agent（注意：需将代码移至return之前，此处为示意）
+    asyncio.create_task(
+        run_agent(
+            query=request.query,
+            output_handler=HTTPOutputHandler(session_id=request.session_id),  # 传递session_id
+            streaming=request.streaming,
+            session_id=request.session_id
+        )
     )
+    
+    # 立即返回包含session_id的确认响应（类似clear_history）
+    return {
+        "code": 200,
+        "message": "请求已接收，结果将通过SSE流推送",
+        "session_id": request.session_id
+    }
+
+@app.get("/sse", response_class=Response)
+async def sse_endpoint(session_id: str = "default"):
+    """SSE接口，客户端通过session_id订阅事件流"""
+    # 获取会话对应的事件队列
+    queue = await sse_registry.subscribe(session_id)
+    
+    # 设置响应头为SSE格式
+    headers = {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+    }
+    
+    async def event_stream():
+        try:
+            while True:
+                # 从队列中获取事件（阻塞直到有新事件）
+                event = await queue.get()
+                # 格式化为SSE标准格式（event: ...\ndata: ...\n\n）
+                yield f"event: {event['event']}\ndata: {json.dumps(event['data'])}\n\n"
+        except asyncio.CancelledError:
+            # 客户端断开连接时清理队列（可选）
+            sse_registry.unregister(session_id)
+    
+    return Response(event_stream(), headers=headers)
 
 # 添加清空对话历史的接口
 @app.post("/clear_history")
