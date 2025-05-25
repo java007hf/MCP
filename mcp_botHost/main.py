@@ -576,7 +576,7 @@ async def run_cli():
 
 async def run_http_server():
     """HTTP 服务器模式"""
-    config = uvicorn.Config(app, host="192.168.3.102", port=8000, log_level="info")
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
 
