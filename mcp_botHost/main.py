@@ -580,8 +580,6 @@ async def run_http_server():
     server = uvicorn.Server(config)
     await server.serve()
 
-
-
 class SSERegistry:
     """管理 SSE 会话的事件队列"""
     def __init__(self):
@@ -649,7 +647,7 @@ async def sse_endpoint(session_id: str = "default"):
             # 客户端断开连接时清理队列（可选）
             sse_registry.unregister(session_id)
     
-    return Response(event_stream(), headers=headers)
+    return EventSourceResponse(event_stream(), headers=headers)
 
 # 添加清空对话历史的接口
 @app.post("/clear_history")
