@@ -660,6 +660,7 @@ async def main():
     """
     应用程序主函数 - 根据命令行参数选择运行模式
     """
+    
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='DeepSeek MCP 服务')
     parser.add_argument('--mode', choices=['cli', 'http'], default='cli',
@@ -689,6 +690,7 @@ async def main():
 # 程序入口点
 if __name__ == "__main__":
     # 运行主函数
+    print("===agent启动===")
     asyncio.run(main())
         
     
